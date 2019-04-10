@@ -37,35 +37,131 @@ class Controller(polyinterface.Controller):
                 'month': 0,
                 'yearly': 0,
                 'year': 0,
+                'yesterday': 0,
                 }
-
+        self.hb = 0
+        self.hub_timestamp = 0
         self.poly.onConfig(self.process_config)
         self.poly.onStop(self.my_stop)
+        self.station = ''
+        self.agl = 0.0
+        self.elevation = 0.0
 
     def process_config(self, config):
-        # this seems to get called twice for every change, why?
-        # What does config represent?
-        LOGGER.info("process_config: Enter");
-        if self.myConfig != config['customParams']:
-            if 'Units' in config['customParams']:
-                if self.myConfig['Units'] != config['customParams']['Units']:
+        # This isn't really what the name implies, it is getting called
+        # for all non-driver database updates.  It also appears to be called
+        # after the database update has occured.  Thus it is pretty much
+        # useless for parameter checking.
 
-                    self.units = config['customParams']['Units'].lower()
-                    for node in self.nodes:
-                        if (node != 'hub' and node != 'controller'):
-                            LOGGER.info("Setting node " + node + " to units " + self.units);
-                            self.nodes[node].SetUnits(self.units)
-                            self.addNode(self.nodes[node])
-                        else:
-                            LOGGER.info("Skipping node " + node)
-                    LOGGER.info("Finished unit configuration.")
+        # can we just ignore non-parameter changes?
+        if self.myConfig == config['customParams']:
+            return
 
-            if 'Elevation' in config['customParams']:
-                self.elevation = config['customParams']['Elevation']
+        # looks like a parameter changed, so which one?
+        new_params = config['customParams']
 
-            self.myConfig = config['customParams']
+        if new_params['Units'] != self.myConfig['Units']:
+            LOGGER.info('Changed units from %s to %s' %
+                    (self.myConfig['Units'], new_params['Units']))
+            # Ideally, we'd like to validate the entered units and
+            # report some error if they are wrong, but at this point
+            # the database has been updated.
+            # FIXME: can we call something common to set the units?
 
-        LOGGER.info("Finished with configuration.")
+            self.units = config['customParams']['Units'].lower()
+            if self.units != 'metric' and self.units != 'us' and self.units != 'uk':
+                # invalid units
+                self.units = 'metric'
+                config['customParams']['Units'] = self.units
+
+            for node in self.nodes:
+               if (node != 'hub' and node != 'controller'):
+                   LOGGER.info("Setting node " + node + " to units " + self.units);
+                   self.nodes[node].SetUnits(self.units)
+                   self.addNode(self.nodes[node])
+               else:
+                   LOGGER.info("Skipping node " + node)
+
+        if new_params['Elevation'] != self.myConfig['Elevation']:
+            LOGGER.info('Changed elevation from %s to %s' %
+                    (self.myConfig['Elevation'], new_params['Elevation']))
+
+        if new_params['ListenPort'] != self.myConfig['ListenPort']:
+            LOGGER.info('Changed UDP Port from %s to %s' %
+                    (self.myConfig['ListenPort'], new_params['ListenPort']))
+
+        self.myConfig = config['customParams']
+
+    def query_wf(self):
+        """
+        We need to call this after we get the customParams because
+        we need the station number. However, we may want some of the
+        data here to override user entered data.  Specifically, elevation
+        and units.
+        """
+        if self.station == "":
+            LOGGER.info('no station defined, skipping lookup.')
+            return
+
+        path_str = '/swd/rest/stations/'
+        path_str += self.station
+        path_str += '?api_key=6c8c96f9-e561-43dd-b173-5198d8797e0a'
+
+        try:
+            http = urllib3.HTTPConnectionPool('swd.weatherflow.com', maxsize=1)
+
+            # Get station meta data. We really want AIR height above ground
+            c = http.request('GET', path_str)
+            awdata = json.loads(c.data.decode('utf-8'))
+            for device in awdata['stations'][0]['devices']:
+                if device['device_type'] == 'AR':
+                    self.agl = float(device['device_meta']['agl'])
+            c.close()
+
+            # Get station observations. Pull Elevation and user unit prefs.
+            path_str = '/swd/rest/observations/station/'
+            path_str += self.station
+            path_str += '?api_key=6c8c96f9-e561-43dd-b173-5198d8797e0a'
+            c = http.request('GET', path_str)
+
+            awdata = json.loads(c.data.decode('utf-8'))
+
+            # TODO: check user preference for units and set accordingly
+            # Check distance & temp
+            # if dist in miles & temp in F == US
+            # if dist in miles & temp in C == UK
+            # else == metric
+            temp_unit = awdata['station_units']['units_temp']
+            dist_unit = awdata['station_units']['units_distance']
+
+            if temp_unit == 'f' and dist_unit == 'mi':
+                LOGGER.info('WF says units are US')
+                self.units = 'us'
+            elif temp_unit == 'c' and dist_unit == 'mi':
+                LOGGER.info('WF says units are UK')
+                self.units = 'uk'
+            else:
+                LOGGER.info('WF says units are metric')
+                self.units = 'metric'
+
+            # Override entered elevation with info from station
+            # TODO: Only override if current value is 0?
+            #       if we do override, should this save to customParams too?
+            self.elevation = float(awdata['elevation'])
+
+            # obs is array of dictionaries. Array index 0 is what we want
+            # to get current daily and yesterday daily rainfall values
+
+            LOGGER.info('daily rainfall = %f' %
+                    awdata['obs'][0]['precip_accum_local_day'])
+            LOGGER.info('yesterday rainfall = %f' %
+                    awdata['obs'][0]['precip_accum_local_yesterday'])
+            c.close()
+
+            http.close()
+        except Exception as e:
+            LOGGER.error('Bad: %s' % str(e))
+
 
     def start(self):
         LOGGER.info('Starting WeatherFlow Node Server')
@@ -73,7 +169,10 @@ class Controller(polyinterface.Controller):
         self.discover()
 
         LOGGER.info('starting thread for UDP data')
-        threading.Thread(target = self.udp_data).start()
+        self.udp = threading.Thread(target = self.udp_data)
+        self.udp.daemon = True
+        self.udp.start()
+
         #for node in self.nodes:
         #       LOGGER.info (self.nodes[node].name + ' is at index ' + node)
         LOGGER.info('WeatherFlow Node Server Started.')
@@ -107,6 +206,8 @@ class Controller(polyinterface.Controller):
                 - Lightning (strikes, distance)
         """
 
+        self.query_wf()
+
         node = TemperatureNode(self, self.address, 'temperature', 'Temperatures')
         node.SetUnits(self.units)
         self.addNode(node)
@@ -130,7 +231,7 @@ class Controller(polyinterface.Controller):
         node.SetUnits(self.units)
         self.addNode(node)
 
-        
+
         if 'customData' in self.polyConfig:
             try:
                 self.rain_data['hourly'] = self.polyConfig['customData']['hourly']
@@ -142,18 +243,27 @@ class Controller(polyinterface.Controller):
                 self.rain_data['day'] = self.polyConfig['customData']['day']
                 self.rain_data['month'] = self.polyConfig['customData']['month']
                 self.rain_data['year'] = self.polyConfig['customData']['year']
-            except: 
+                self.rain_data['yesterday'] = self.polyConfig['customData']['yesterday']
+            except:
                 self.rain_data['hourly'] = 0
                 self.rain_data['daily'] = 0
                 self.rain_data['weekly'] = 0
                 self.rain_data['monthly'] = 0
                 self.rain_data['yearly'] = 0
+                self.rain_data['yesterday'] = 0
                 self.rain_data['hour'] = datetime.datetime.now().hour
                 self.rain_data['day'] = datetime.datetime.now().day
+                self.rain_data['week'] = datetime.datetime.now().isocalendar()[1]
                 self.rain_data['month'] = datetime.datetime.now().month
                 self.rain_data['year'] = datetime.datetime.now().year
+                # TODO: Can we query the current accumulation data from
+                # weatherflow servers???
 
             self.nodes['rain'].InitializeRain(self.rain_data)
+
+            # Might be able to get some information from API using station
+            # number:
+            # swd.weatherflow.com/swd/rest/observations/station/<num>?apikey=
 
     def heartbeat(self):
         LOGGER.debug('heartbeat hb={}'.format(self.hb))
@@ -167,7 +277,7 @@ class Controller(polyinterface.Controller):
     def set_hub_timestamp(self):
         s = int(time.time() - self.hub_timestamp)
         LOGGER.debug("set_hub_timestamp: {}".format(s))
-        self.setDriver('GV4', s)
+        self.setDriver('GV4', s, report=True, force=True)
 
     def delete(self):
         self.stopping = True
@@ -185,27 +295,46 @@ class Controller(polyinterface.Controller):
         self.stopping = True
         LOGGER.debug('Stopping WeatherFlow node server.')
 
+    def check_units(self):
+        if 'Units' in self.polyConfig['customParams']:
+            units = self.polyConfig['customParams']['Units'].lower()
+
+            if units != 'metric' and units != 'us' and units != 'uk':
+                # invalid units
+                units = 'metric'
+                self.addCustomParam({'Units': units})
+        else:
+            units = 'metric'
+
+        return units
+
     def check_params(self):
         """
         Elevation, UDP port, and Units for now.
         """
         default_port = 50222
-        default_elevation = 0
+        default_elevation = 0.0
         default_units = "metric"
+
+        self.units = self.check_units()
+
         if 'ListenPort' in self.polyConfig['customParams']:
             self.udp_port = int(self.polyConfig['customParams']['ListenPort'])
         else:
             self.udp_port = default_port
+            self.polyConfig['customParams']['ListenPort'] = default_port
 
-        if 'Units' in self.polyConfig['customParams']:
-            self.units = self.polyConfig['customParams']['Units'].lower()
-        else:
-            self.units = default_units
+        if 'Station' in self.polyConfig['customParams']:
+            self.station = self.polyConfig['customParams']['Station']
+
+        if 'AGL' in self.polyConfig['customParams']:
+            self.agl = float(self.polyConfig['customParams']['AGL'])
 
         if 'Elevation' in self.polyConfig['customParams']:
-            self.elevation = self.polyConfig['customParams']['Elevation']
+            self.elevation = float(self.polyConfig['customParams']['Elevation'])
         else:
             self.elevation = default_elevation
+            self.polyConfig['customParams']['Elevation'] = default_elevation
 
         self.myConfig = self.polyConfig['customParams']
 
@@ -234,6 +363,8 @@ class Controller(polyinterface.Controller):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(('0.0.0.0', self.udp_port))
         windspeed = 0
+        sky_tm = 0
+        air_tm = 0
 
         LOGGER.info("Starting UDP receive loop")
         while self.stopping == False:
@@ -249,16 +380,21 @@ class Controller(polyinterface.Controller):
             """
             if (data["type"] == "obs_air"):
                 # process air data
-                t = data['obs'][0][0] # ts
-                p = data['obs'][0][1] # pressure
-                t = data['obs'][0][2] # temp
-                h = data['obs'][0][3] # humidity
+                tm = data['obs'][0][0] # ts
+                p = data['obs'][0][1]  # pressure
+                t = data['obs'][0][2]  # temp
+                h = data['obs'][0][3]  # humidity
                 ls = data['obs'][0][4] # strikes
                 ld = data['obs'][0][5] # distance
 
-                sl = self.nodes['pressure'].toSeaLevel(p, 400)
-                self.nodes['pressure'].setDriver('ST', sl)
-                self.nodes['pressure'].setDriver('GV0', p)
+                if air_tm == tm:
+                    LOGGER.debug('Duplicate AIR observations, ignorning')
+                    continue
+
+                air_tm = tm
+                sl = self.nodes['pressure'].toSeaLevel(p, self.elevation + self.agl)
+                self.nodes['pressure'].setDriver('ST', p)
+                self.nodes['pressure'].setDriver('GV0', sl)
                 trend = self.nodes['pressure'].updateTrend(p)
                 self.nodes['pressure'].setDriver('GV1', trend)
 
@@ -282,6 +418,7 @@ class Controller(polyinterface.Controller):
 
             if (data["type"] == "obs_sky"):
                 # process sky data
+                tm = data['obs'][0][0]  # epoch
                 il = data['obs'][0][1]  # Illumination
                 uv = data['obs'][0][2]  # UV Index
                 ra = float(data['obs'][0][3])  # rain
@@ -292,9 +429,14 @@ class Controller(polyinterface.Controller):
                 it = data['obs'][0][9]  # reporting interval
                 sr = data['obs'][0][10]  # solar radiation
 
+                if sky_tm == tm:
+                    LOGGER.debug('Duplicate SKY observations, ignorning')
+                    continue
+
+                sky_tm = tm
                 windspeed = ws
                 #ra = .58 # just over half a mm of rain each minute
-                
+
                 self.nodes['wind'].setDriver('ST', ws)
                 self.nodes['wind'].setDriver('GV0', wd)
                 self.nodes['wind'].setDriver('GV1', wg)
@@ -311,9 +453,14 @@ class Controller(polyinterface.Controller):
 
                 self.rain_data['hourly'] = rain.hourly_accumulation(ra)
                 self.rain_data['daily'] = rain.daily_accumulation(ra)
+                self.rain_data['yesterday'] = rain.yesterday_accumulation()
                 self.rain_data['weekly'] = rain.weekly_accumulation(ra)
                 self.rain_data['monthly'] = rain.monthly_accumulation(ra)
                 self.rain_data['yearly'] = rain.yearly_accumulation(ra)
+                LOGGER.debug('RAIN %f %f %f %f %f %f %f' %
+                        (ra, rr, self.rain_data['hourly'],
+                        self.rain_data['daily'], self.rain_data['weekly'],
+                        self.rain_data['monthly'], self.rain_data['yearly']))
 
                 self.rain_data['hour'] = datetime.datetime.now().hour
                 self.rain_data['day'] = datetime.datetime.now().day
@@ -325,6 +472,7 @@ class Controller(polyinterface.Controller):
                 rain.setDriver('GV2', self.rain_data['weekly'])
                 rain.setDriver('GV3', self.rain_data['monthly'])
                 rain.setDriver('GV4', self.rain_data['yearly'])
+                rain.setDriver('GV5', self.rain_data['yesterday'])
 
                 self.poly.saveCustomData(self.rain_data)
 
@@ -354,7 +502,7 @@ class Controller(polyinterface.Controller):
     name = 'WeatherFlow'
     address = 'hub'
     stopping = False
-    hint = 0xffffff
+    hint = [1, 11, 0, 0]
     units = 'metric'
     commands = {
         'DISCOVER': discover,
@@ -374,7 +522,7 @@ class Controller(polyinterface.Controller):
 
 class TemperatureNode(polyinterface.Node):
     id = 'temperature'
-    hint = 0xffffff
+    hint = [1,11,1,0]
     units = 'us'
     drivers = [
             {'driver': 'ST', 'value': 0, 'uom': 17},
@@ -411,6 +559,10 @@ class TemperatureNode(polyinterface.Node):
     def Dewpoint(self, t, h):
         b = (17.625 * t) / (243.04 + t)
         rh = h / 100.0
+
+        if rh <= 0:
+            return 0
+
         c = math.log(rh)
         dewpt = (243.04 * (c + b)) / (17.625 - c - b)
         return round(dewpt, 1)
@@ -461,7 +613,7 @@ class TemperatureNode(polyinterface.Node):
 
 class HumidityNode(polyinterface.Node):
     id = 'humidity'
-    hint = 0xffffff
+    hint = [1,11,2,0]
     units = 'metric'
     drivers = [{'driver': 'ST', 'value': 0, 'uom': 22}]
 
@@ -473,11 +625,11 @@ class HumidityNode(polyinterface.Node):
 
 class PressureNode(polyinterface.Node):
     id = 'pressure'
-    hint = 0xffffff
+    hint = [1,11,3,0]
     units = 'metric'
     drivers = [
-            {'driver': 'ST', 'value': 0, 'uom': 117},  # abs press
-            {'driver': 'GV0', 'value': 0, 'uom': 117}, # rel press
+            {'driver': 'ST', 'value': 0, 'uom': 117},  # abs (station) press
+            {'driver': 'GV0', 'value': 0, 'uom': 117}, # rel (sealevel) press
             {'driver': 'GV1', 'value': 0, 'uom': 25}  # trend
             ]
     mytrend = []
@@ -503,49 +655,62 @@ class PressureNode(polyinterface.Node):
 
     # convert station pressure in millibars to sealevel pressure
     def toSeaLevel(self, station, elevation):
-        i = 287.05
-        a = 9.80665
-        r = 0.0065
+        i = 287.05  # gas constant for dry air
+        a = 9.80665 # gravity
+        r = 0.0065  # standard atmosphere lapse rate
         s = 1013.35 # pressure at sealevel
-        n = 288.15
+        n = 288.15  # sea level temperature
 
         l = a / (i * r)
+
         c = i * r / a
-        u = math.pow(1 + math.pow(s / station, c) * (r * elevation / n), 1)
+
+        u = math.pow(1 + math.pow(s / station, c) * (r * elevation / n), l)
 
         return (round((station * u), 3))
 
     # track pressures in a queue and calculate trend
     def updateTrend(self, current):
-        t = 0
+        t = 1  # Steady
         past = 0
 
+        if len(self.mytrend) > 1:
+            LOGGER.info('LAST entry = %f' % self.mytrend[-1])
         if len(self.mytrend) == 180:
+            # This should be poping the last entry on the list (or the
+            # oldest item added to the list).
             past = self.mytrend.pop()
 
         if self.mytrend != []:
-            past = self.mytrend[0]
+            # mytrend[0] seems to be the last entry inserted, not
+            # the first.  So how do we get the last item from the
+            # end of the array -- mytrend[-1]
+            past = self.mytrend[-1]
 
         # calculate trend
+        LOGGER.info('TREND %f to %f' % (past, current))
         if ((past - current) > 1):
-            t = -1
+            t = 0 # Falling
         elif ((past - current) < -1):
-            t = 1
+            t = 2 # Rising
 
+        # inserts the value at index 0 and bumps all existing entries
+        # up by one index
         self.mytrend.insert(0, current)
+
         return t
 
     # We want to override the SetDriver method so that we can properly
     # convert the units based on the user preference.
     def setDriver(self, driver, value):
-        if (self.units == 'us'):
+        if (self.units == 'us' and driver != 'GV1' ):
             value = round(value * 0.02952998751, 3)
         super(PressureNode, self).setDriver(driver, value, report=True, force=True)
 
 
 class WindNode(polyinterface.Node):
     id = 'wind'
-    hint = 0xffffff
+    hint = [1,11,4,0]
     units = 'metric'
     drivers = [
             {'driver': 'ST', 'value': 0, 'uom': 32},  # speed
@@ -581,7 +746,7 @@ class WindNode(polyinterface.Node):
 
 class PrecipitationNode(polyinterface.Node):
     id = 'precipitation'
-    hint = 0xffffff
+    hint = [1,11,5,0]
     units = 'metric'
     drivers = [
             {'driver': 'ST', 'value': 0, 'uom': 46},  # rate
@@ -589,13 +754,15 @@ class PrecipitationNode(polyinterface.Node):
             {'driver': 'GV1', 'value': 0, 'uom': 82}, # daily
             {'driver': 'GV2', 'value': 0, 'uom': 82}, # weekly
             {'driver': 'GV3', 'value': 0, 'uom': 82}, # monthly
-            {'driver': 'GV4', 'value': 0, 'uom': 82}  # yearly
+            {'driver': 'GV4', 'value': 0, 'uom': 82}, # yearly
+            {'driver': 'GV5', 'value': 0, 'uom': 82}  # yesterday
             ]
     hourly_rain = 0
     daily_rain = 0
     weekly_rain = 0
     monthly_rain = 0
     yearly_rain = 0
+    yesterday_rain = 0
 
     prev_hour = 0
     prev_day = 0
@@ -609,12 +776,56 @@ class PrecipitationNode(polyinterface.Node):
         self.weekly_rain = acc['weekly']
         self.monthly_rain = acc['monthly']
         self.yearly_rain = acc['yearly']
+        self.yesterday_rain = acc['yesterday']
 
         self.prev_hour = acc['hour']
         self.prev_day = acc['day']
         self.prev_week = acc['week']
         self.prev_month = acc['month']
         self.prev_year = acc['year']
+
+        now = datetime.datetime.now()
+
+        # Need to compare saved date with current date and clear out
+        # any accumlations that are old.
+
+        current_hour = now.hour
+        if self.prev_hour != now.hour:
+            LOGGER.info('Clearing old hourly data')
+            self.prev_hour = now.hour
+            self.hourly_rain = 0
+
+        if self.prev_day != now.day:
+            LOGGER.info('Clearing old daily, hourly data')
+            self.yesterday_rain = self.daily_rain
+            self.prev_day = now.day
+            self.hourly_rain = 0
+            self.daily_rain = 0
+
+        if self.prev_week != now.isocalendar()[1]:
+            LOGGER.info('Clearing old weekly, daily, hourly data')
+            self.prev_week = now.isocalendar()[1]
+            self.hourly_rain = 0
+            self.daily_rain = 0
+            self.weekly_rain = 0
+
+        if self.prev_month != now.month:
+            LOGGER.info('Clearing old monthly, daily, hourly data')
+            self.prev_month = now.month
+            self.hourly_rain = 0
+            self.daily_rain = 0
+            self.weekly_rain = 0
+            self.monthly_rain = 0
+
+        if self.prev_year != now.year:
+            LOGGER.info('Clearing old yearly, monthly, daily, hourly data')
+            self.prev_year = now.year
+            self.hourly_rain = 0
+            self.daily_rain = 0
+            self.weekly_rain = 0
+            self.monthly_rain = 0
+            self.yearly_rain = 0
+
 
     def SetUnits(self, u):
         self.units = u
@@ -625,6 +836,7 @@ class PrecipitationNode(polyinterface.Node):
             self.drivers[3]['uom'] = 82
             self.drivers[4]['uom'] = 82
             self.drivers[5]['uom'] = 82
+            self.drivers[6]['uom'] = 82
             self.id = 'precipitation'
         elif (u == 'uk'):
             self.drivers[0]['uom'] = 46
@@ -633,6 +845,7 @@ class PrecipitationNode(polyinterface.Node):
             self.drivers[3]['uom'] = 82
             self.drivers[4]['uom'] = 82
             self.drivers[5]['uom'] = 82
+            self.drivers[6]['uom'] = 82
             self.id = 'precipitationUK'
         elif (u == 'us'):
             self.drivers[0]['uom'] = 24
@@ -641,13 +854,14 @@ class PrecipitationNode(polyinterface.Node):
             self.drivers[3]['uom'] = 105
             self.drivers[4]['uom'] = 105
             self.drivers[5]['uom'] = 105
+            self.drivers[6]['uom'] = 105
             self.id = 'precipitationUS'
 
     def hourly_accumulation(self, r):
         current_hour = datetime.datetime.now().hour
         if (current_hour != self.prev_hour):
             self.prev_hour = current_hour
-            self.hourly = 0
+            self.hourly_rain = 0
 
         self.hourly_rain += r
         return self.hourly_rain
@@ -655,17 +869,21 @@ class PrecipitationNode(polyinterface.Node):
     def daily_accumulation(self, r):
         current_day = datetime.datetime.now().day
         if (current_day != self.prev_day):
+            self.yesterday_rain = self.daily_rain
             self.prev_day = current_day
             self.daily_rain = 0
 
         self.daily_rain += r
         return self.daily_rain
 
+    def yesterday_accumulation(self):
+        return self.yesterday_rain
+
     def weekly_accumulation(self, r):
-        if datetime.datetime.now().weekday == 0:
-            if datetime.datetime.now().hour == 0:
-                if datetime.datetime.now().minute == 0:
-                    self.weekly_rain = 0
+        (y, w, d) = datetime.datetime.now().isocalendar()
+        if w != self.prev_week:
+            self.prev_week = w
+            self.weekly_rain = 0
 
         self.weekly_rain += r
         return self.weekly_rain
@@ -696,7 +914,7 @@ class PrecipitationNode(polyinterface.Node):
 class LightNode(polyinterface.Node):
     id = 'light'
     units = 'metric'
-    hint = 0xffffff
+    hint = [1,11,6,0]
     drivers = [
             {'driver': 'ST', 'value': 0, 'uom': 71},  # UV
             {'driver': 'GV0', 'value': 0, 'uom': 74},  # solar radiation
@@ -711,7 +929,7 @@ class LightNode(polyinterface.Node):
 
 class LightningNode(polyinterface.Node):
     id = 'lightning'
-    hint = 0xffffff
+    hint = [1,11,7,0]
     units = 'metric'
     drivers = [
             {'driver': 'ST', 'value': 0, 'uom': 25},  # Strikes

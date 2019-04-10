@@ -56,11 +56,45 @@ The WeatherFlow nodeserver keeps track of the version number and when a profile 
 
 # Release Notes
 
-- 0.1.8 09/26/2018
-  - Send DON/DOF for heartbeat
-  - et initial Controller ST default to 1
-  - Set Hub Seconds Since Seen
+- 0.1.17 10/29/2018
+  - Add rain yesterday to rain node.
+  - Ignore duplicate UDP packets.
+- 0.1.16 10/22/2018
+  - Clean up debugging log output
+  - Add specific debug output of all raw rain values
+- 0.1.15 10/19/2018
+  - Fix pressure trend (at least during initial 3 hour window)
+  - Reverse relative and absolut pressure values, the were mixed up.
+- 0.1.14 10/18/2018
+  - Add station id configuration option
+  - Using station id, query WF servers for station elevation, Air height
+    above ground, and user's unit preferences.
+  - Add configuration option for Air sensor height above ground
+- 0.1.13 10/17/2018
+  - Use entered elevation for sealevel pressure calulation
+- 0.1.12 10/16/2018
+  - Fix typo in sea level pressure calculation
+  - Add error checking to dewpoint calculation
+- 0.1.11 10/15/2018
+  - Change weekly rain accumulation to use week number instead of day of week.
+  - Hourly rain was not reseting at begining of next hour
+  - Clear old rain accumulations on restart
+  - Fix pressure trend values, the values didn't match the NLS names.
+  - Don't convert pressure trend when US units are selected, trying to do
+    a mb -> inHg conversion on the trend value doesn't make sense.
+- 0.1.10 10/09/2018
+  - Add error checking to units entry.
+  - Add configuration help text
+- 0.1.9 10/04/2018
+  - Set hint correctly
+  - Fix bug with UDP thread start.
+- 0.1.8 09/16/2018
+  - JimBo: Send DON/DOF for heartbeta
+  - JimBo: Set initial Controller ST default to 1
+  - JimBo: Set Hub Seconds Since Seen
 - 0.1.7 09/26/2018
+   - Add some error trapping in the config change handler
+   - Make sure the configuration values are set before trying to use them
    - Fix bug in restoring rain accumulation.
    - Changed order of node creation so that nodes get added with the correct units.
 - 0.1.6 09/25/2018
