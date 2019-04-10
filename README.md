@@ -104,7 +104,7 @@ The WeatherFlow nodeserver keeps track of the version number and when a profile 
 - 0.1.4 09/10/2018
    - Convert this to a python program instead of a node.js program
 - 0.1.3 09/04/2018
-   - Fix bug in NodeDef selections.
+   - Fix bug in NodeDef selections. 
 - 0.1.2 07/10/2018
    - Add logging for the UDP port number used.
    - Add error trapping and logging for the UDP socket connection

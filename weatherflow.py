@@ -21,8 +21,6 @@ class Controller(polyinterface.Controller):
         self.name = 'WeatherFlow'
         self.address = 'hub'
         self.primary = self.address
-        self.hb = 0
-        self.hub_timestamp = 0
         self.stopping = False
         self.stopped = True
         self.myConfig = {}
@@ -230,7 +228,6 @@ class Controller(polyinterface.Controller):
         node = LightningNode(self, self.address, 'lightning', 'Lightning')
         node.SetUnits(self.units)
         self.addNode(node)
-
 
         if 'customData' in self.polyConfig:
             try:
@@ -906,6 +903,7 @@ class PrecipitationNode(polyinterface.Node):
         self.yearly_rain += r
         return self.yearly_rain
 
+
     def setDriver(self, driver, value):
         if (self.units == 'us'):
             value = round(value * 0.03937, 2)
@@ -946,7 +944,7 @@ class LightningNode(polyinterface.Node):
             self.drivers[0]['uom'] = 25
             self.drivers[1]['uom'] = 116
             self.id = 'lightningUK'
-        elif (u == 'us'):
+        elif (u == 'us'): 
             self.drivers[0]['uom'] = 25
             self.drivers[1]['uom'] = 116
             self.id = 'lightningUS'
